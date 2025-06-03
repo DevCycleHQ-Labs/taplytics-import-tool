@@ -1,61 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/ettle/strcase"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
-
-type TLVariable struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
-}
-type TLImportFormat struct {
-	TLProject  string           `json:"tl_project"`
-	DVCProject string           `json:"dvc_project"`
-	Records    []TLImportRecord `json:"records"`
-}
-
-type TLImportRecord struct {
-	ID          string       `json:"_id"`
-	FeatureName string       `json:"featureName"`
-	Variables   []TLVariable `json:"variables"`
-	Tags        []string     `json:"tags"`
-}
-
-type DevCycleVariable struct {
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
-	Key         string `json:"key"`
-	Type        string `json:"type,omitempty"`
-}
-
-type DevCycleVariation struct {
-	Key       string         `json:"key"`
-	Name      string         `json:"name"`
-	Variables map[string]any `json:"variables"`
-}
-
-type SdkVisibility struct {
-	Mobile bool `json:"mobile"`
-	Client bool `json:"client"`
-	Server bool `json:"server"`
-}
-
-type DevCycleNewFeaturePOSTBody struct {
-	Name          string              `json:"name"`
-	Key           string              `json:"key"`
-	Description   string              `json:"description"`
-	Variables     []DevCycleVariable  `json:"variables"`
-	Variations    []DevCycleVariation `json:"variations"`
-	SdkVisibility SdkVisibility       `json:"sdkVisibility"`
-	Type          string              `json:"type"`
-	Tags          []string            `json:"tags"`
-}
 
 var nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9\-_ ]+`)
 
@@ -78,13 +33,11 @@ func getDefaultValue(variableType string, state bool) any {
 		return ""
 	}
 }
-
 func main() {
 	var dvcProject string
 	// Read in the first argument as the file path
 	filePath := os.Args[1]
 
-	client := http.DefaultClient
 	fileContent, err := os.ReadFile(filePath)
 	if err != nil {
 		fmt.Println("Error reading file:", err)
@@ -107,6 +60,9 @@ func main() {
 	var cleanedTLImport []TLImportRecord
 	// Clean up the feature names for merging
 	for _, feature := range tlImport.Records {
+		if len(feature.Variables) == 0 {
+			continue
+		}
 		cleanedTLImport = append(cleanedTLImport, feature)
 	}
 
@@ -123,84 +79,132 @@ func main() {
 		}
 	}
 
-	var newFeatures []DevCycleNewFeaturePOSTBody
-	for _, feature := range mergedFeatures {
-		var variables []DevCycleVariable
-		for _, variable := range feature.Variables {
-			key := fmt.Sprintf("%s%s", strcase.ToKebab(clearString(variable.Name)), "-taplytics")
+	fmt.Println("Importing", len(mergedFeatures), "features from Taplytics to DevCycle")
+	fmt.Println("DevCycle Project:", dvcProject)
+	fmt.Println("CustomData Properties:", tlImport.GetCustomDataProperties())
 
-			devCycleVariable := DevCycleVariable{
-				Name: variable.Name,
-				Key:  key,
-				Type: variable.Type,
+	// Now create features with targeting rules
+	if err = importFeaturesToDevCycle(dvcProject, mergedFeatures); err != nil {
+		fmt.Printf("Error importing features: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Import completed successfully!")
+}
+
+func checkAndCreateCustomProperties(dvcProject string, customData map[string]string) error {
+	// Get existing custom properties
+	existingProps, err := getExistingCustomProperties(dvcProject)
+	if err != nil {
+		return fmt.Errorf("failed to get existing custom properties: %w", err)
+	}
+
+	// Create any missing properties
+	for key, dataType := range customData {
+		if _, exists := existingProps[key]; !exists {
+			if err := createCustomProperty(dvcProject, key, dataType); err != nil {
+				return fmt.Errorf("failed to create custom property %s: %w", key, err)
 			}
-			variables = append(variables, devCycleVariable)
-		}
-		variationOn := DevCycleVariation{
-			Key:       "imported-on",
-			Name:      "On",
-			Variables: make(map[string]any),
-		}
-		variationOff := DevCycleVariation{
-			Key:       "imported-off",
-			Name:      "Off",
-			Variables: make(map[string]any),
-		}
-
-		for _, variable := range feature.Variables {
-			variableKey := fmt.Sprintf("%s%s", strcase.ToKebab(clearString(variable.Name)), "-taplytics")
-
-			variationOn.Variables[variableKey] = getDefaultValue(variable.Type, true)
-			variationOff.Variables[variableKey] = getDefaultValue(variable.Type, false)
-		}
-		newFeature := DevCycleNewFeaturePOSTBody{
-			Name:        feature.FeatureName,
-			Description: fmt.Sprintf("Imported from Taplytics - https://taplytics.com/dashboard/%s/featureFlags/%s/results", tlImport.TLProject, feature.ID),
-			Key:         strings.ToLower(strcase.ToKebab(feature.FeatureName)),
-			Variables:   variables,
-			Variations:  []DevCycleVariation{variationOn, variationOff},
-			Type:        "release",
-			Tags: append([]string{
-				fmt.Sprintf("%s", feature.ID),
-				"taplytics-import",
-			}, feature.Tags...),
-			SdkVisibility: SdkVisibility{Mobile: true, Client: true, Server: true},
-		}
-		newFeatures = append(newFeatures, newFeature)
-	}
-	// Split the new features array into blocks of 20 to make it easier to import
-	var chunkedFeatures [][]DevCycleNewFeaturePOSTBody
-	for i := 0; i < len(newFeatures); i += 20 {
-		end := i + 20
-		if end > len(newFeatures) {
-			end = len(newFeatures)
-		}
-		chunkedFeatures = append(chunkedFeatures, newFeatures[i:end])
-	}
-	fmt.Println("Importing", len(newFeatures), "features in", len(chunkedFeatures), "chunks")
-
-	for _, chunk := range chunkedFeatures {
-		chunkJSON, err := json.Marshal(chunk)
-		if err != nil {
-			fmt.Println("Error marshalling chunk:", err)
-			return
-		}
-		req, err := http.NewRequest("POST", fmt.Sprintf("https://api.devcycle.com/v1/projects/%s/features/multiple", dvcProject), strings.NewReader(string(chunkJSON)))
-		if err != nil {
-			fmt.Println("Error creating request:", err)
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", os.Getenv("DEVCYCLE_API_TOKEN")))
-		resp, err := client.Do(req)
-		if err != nil {
-			fmt.Println("Error sending request:", err)
-			return
-		}
-
-		if resp.StatusCode != 201 {
-			fmt.Println("Error importing features:", resp.Status)
-			continue
+			fmt.Printf("Created custom property: %s (%s)\n", key, dataType)
+		} else {
+			fmt.Printf("Custom property %s already exists\n", key)
 		}
 	}
+
+	return nil
+}
+
+func getExistingCustomProperties(dvcProject string) (map[string]struct{}, error) {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	req, err := http.NewRequest("GET",
+		fmt.Sprintf("https://api.devcycle.com/v1/projects/%s/custom-properties", dvcProject),
+		nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", os.Getenv("DEVCYCLE_API_TOKEN")))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API returned error %d: %s", resp.StatusCode, string(body))
+	}
+
+	// We're intentionally ignoring the rest of the properties because we only care about the keys for dedupe
+	var response struct {
+		Data []struct {
+			Key string `json:"key"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, err
+	}
+
+	// Create map of property keys for quick lookup
+	result := make(map[string]struct{})
+	for _, prop := range response.Data {
+		result[prop.Key] = struct{}{}
+	}
+
+	return result, nil
+}
+
+func createCustomProperty(dvcProject, key, dataType string) error {
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// Map Taplytics data types to DevCycle types
+	dvcType := "String"
+	switch dataType {
+	case "Boolean":
+		dvcType = "Boolean"
+	case "Number":
+		dvcType = "Number"
+	}
+
+	payload := map[string]interface{}{
+		"name":        key,
+		"propertyKey": key,
+		"key":         key,
+		"type":        dvcType,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST",
+		fmt.Sprintf("https://api.devcycle.com/v1/projects/%s/custom-properties", dvcProject),
+		bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", os.Getenv("DEVCYCLE_API_TOKEN")))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API returned error %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
