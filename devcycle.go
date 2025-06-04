@@ -60,10 +60,61 @@ type devcycleAPI struct {
 	client  *http.Client
 }
 
+// GetDevCycleOAuthToken requests an OAuth token from DevCycle using client credentials.
+func GetDevCycleOAuthToken(clientID, clientSecret string) (string, error) {
+	url := "https://auth.devcycle.com/oauth/token"
+	payload := map[string]string{
+		"grant_type":    "client_credentials",
+		"client_id":     clientID,
+		"client_secret": clientSecret,
+	}
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("unexpected status: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return result.AccessToken, nil
+}
+
 func newDevCycleAPI() *devcycleAPI {
+	var token string
+	if os.Getenv("DEVCYCLE_API_TOKEN") == "" {
+		fmt.Println("DEVCYCLE_API_TOKEN environment variable is not set")
+		if os.Getenv("DEVCYCLE_CLIENT_ID") != "" && os.Getenv("DEVCYCLE_CLIENT_SECRET") != "" {
+			token, _ = GetDevCycleOAuthToken(os.Getenv("DEVCYCLE_CLIENT_ID"), os.Getenv("DEVCYCLE_CLIENT_SECRET"))
+		}
+	} else {
+		token = os.Getenv("DEVCYCLE_API_TOKEN")
+	}
+
 	return &devcycleAPI{
 		baseURL: "https://api.devcycle.com/v1",
-		token:   os.Getenv("DEVCYCLE_API_TOKEN"),
+		token:   token,
 		client:  sharedHTTPClient,
 	}
 }

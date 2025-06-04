@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"github.com/ettle/strcase"
+	"io/ioutil"
+	"net/http"
 	"strings"
 )
 
