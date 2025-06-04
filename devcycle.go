@@ -103,13 +103,13 @@ func createTargetingRule(dvcProject, featureID string, tlFeature TLImportRecord)
 
 func createDevCycleFeature(dvcProject string, tlFeature TLImportRecord) error {
 	// Generate a valid feature key from the name
-	featureKey := generateFeatureKey(tlFeature.FeatureName)
+	featureKey := toKey(tlFeature.FeatureName)
 
 	// Set up variables
 	variables := []DevCycleVariable{}
 	for _, tlVar := range tlFeature.Variables {
 		varType := convertTaplyticsVarTypeToDevCycle(tlVar.Type)
-		varKey := generateFeatureKey(tlVar.Name)
+		varKey := toKey(tlVar.Name)
 
 		variables = append(variables, DevCycleVariable{
 			Name:        tlVar.Name,
@@ -119,16 +119,15 @@ func createDevCycleFeature(dvcProject string, tlFeature TLImportRecord) error {
 		})
 	}
 
-	// Create variations (always need at least "control" and "treatment" variations)
 	variations := []DevCycleVariation{
 		{
-			Key:       "control",
-			Name:      "Control",
+			Key:       "imported-on",
+			Name:      "On",
 			Variables: createVariationValues(variables, false),
 		},
 		{
-			Key:       "treatment",
-			Name:      "Treatment",
+			Key:       "imported-off",
+			Name:      "Off",
 			Variables: createVariationValues(variables, true),
 		},
 	}
@@ -225,4 +224,124 @@ func importFeaturesToDevCycle(dvcProject string, mergedFeatures map[string]TLImp
 	}
 
 	return nil
+}
+
+// DevCycleFeatureConfig represents a feature configuration in DevCycle
+type DevCycleFeatureConfig struct {
+	Name           string                  `json:"name"`
+	FeatureKey     string                  `json:"featureKey"`
+	Enabled        bool                    `json:"enabled"`
+	TargetingRules []DevCycleTargetingRule `json:"targetingRules,omitempty"`
+	ServingRules   []interface{}           `json:"servingRules,omitempty"`
+	VariationKey   string                  `json:"variationKey,omitempty"`
+	Variables      map[string]interface{}  `json:"variables,omitempty"`
+}
+
+// DevCycleTargetingRule represents a targeting rule in DevCycle
+type DevCycleTargetingRule struct {
+	Name         string                 `json:"name"`
+	Audience     map[string]interface{} `json:"audience,omitempty"`
+	VariationKey string                 `json:"variationKey,omitempty"`
+	Variables    map[string]interface{} `json:"variables,omitempty"`
+}
+
+// CreateFeatureConfiguration creates a feature configuration (targeting rule) in DevCycle
+func CreateFeatureConfiguration(
+	apiKey string,
+	projectKey string,
+	featureKey string,
+	tlAudience TLAudience,
+	variationKey string,
+	variables map[string]interface{},
+) error {
+	// Build the feature configuration
+	featureConfig := DevCycleFeatureConfig{
+		Name:         fmt.Sprintf("%s Configuration", featureKey),
+		FeatureKey:   featureKey,
+		Enabled:      true,
+		VariationKey: variationKey,
+		Variables:    variables,
+	}
+
+	// If there's audience targeting, add a targeting rule
+	if tlAudience.Name != "" {
+		targetingRule := DevCycleTargetingRule{
+			Name:         tlAudience.Name,
+			Audience:     convertTLFiltersToDevCycleTargeting(tlAudience.Filters),
+			VariationKey: variationKey,
+			Variables:    variables,
+		}
+		featureConfig.TargetingRules = []DevCycleTargetingRule{targetingRule}
+	}
+
+	// Create the feature configuration via API
+	url := fmt.Sprintf("https://api.devcycle.com/v1/projects/%s/features/%s/configurations", projectKey, featureKey)
+
+	body, err := json.Marshal(featureConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal feature configuration: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("failed to create feature configuration: HTTP %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// ConvertAndCreateFeatureConfig converts Taplytics record to DevCycle feature config
+func ConvertAndCreateFeatureConfig(
+	apiKey string,
+	projectKey string,
+	record TLImportRecord,
+	featureKey string,
+) error {
+	// Default variation is true (enabled)
+	variationKey := "true"
+
+	// Build variables map from record.Variables
+	variables := make(map[string]interface{})
+	for _, v := range record.Variables {
+		varKey := toKey(fmt.Sprintf("%s_%s", record.FeatureName, v.Name))
+		// Default values based on type
+		switch convertTaplyticsVarTypeToDevCycle(v.Type) {
+		case "Boolean":
+			variables[varKey] = true
+		case "Number":
+			variables[varKey] = 1
+		case "String":
+			variables[varKey] = "enabled"
+		case "JSON":
+			variables[varKey] = map[string]interface{}{"enabled": true}
+		}
+	}
+
+	// If no variables, we'll just set the feature flag itself
+	if len(variables) == 0 {
+		variables[featureKey] = true
+	}
+
+	return CreateFeatureConfiguration(
+		apiKey,
+		projectKey,
+		featureKey,
+		record.Audience,
+		variationKey,
+		variables,
+	)
 }

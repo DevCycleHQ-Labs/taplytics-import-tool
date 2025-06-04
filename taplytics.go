@@ -66,16 +66,6 @@ func convertTLFiltersToDevCycleTargeting(tlFilter TLFilter) map[string]interface
 		dvcFilter := map[string]interface{}{}
 
 		switch filter.SubType {
-		case "platform":
-			dvcFilter["type"] = "user"
-			dvcFilter["subType"] = "platform"
-			dvcFilter["comparator"] = filter.Comparator
-			dvcFilter["values"] = filter.Values
-		case "appVersion":
-			dvcFilter["type"] = "user"
-			dvcFilter["subType"] = "appVersion"
-			dvcFilter["comparator"] = filter.Comparator
-			dvcFilter["values"] = filter.Values
 		case "customData":
 			dvcFilter["type"] = "user"
 			dvcFilter["subType"] = "customData"
@@ -83,7 +73,10 @@ func convertTLFiltersToDevCycleTargeting(tlFilter TLFilter) map[string]interface
 			dvcFilter["comparator"] = filter.Comparator
 			dvcFilter["values"] = filter.Values
 		default:
-			// Skip unsupported filter types
+			dvcFilter["type"] = "user"
+			dvcFilter["subType"] = filter.SubType
+			dvcFilter["comparator"] = filter.Comparator
+			dvcFilter["values"] = filter.Values
 			continue
 		}
 
@@ -93,16 +86,13 @@ func convertTLFiltersToDevCycleTargeting(tlFilter TLFilter) map[string]interface
 	return result
 }
 
-func generateFeatureKey(name string) string {
-
+func toKey(name string) string {
 	sections := strings.Split(name, ".")
 	var modifiedSections []string
 	for _, section := range sections {
 		modifiedSections = append(modifiedSections, strcase.ToKebab(section))
 	}
-
 	key := strings.Join(modifiedSections, "_")
-
 	return key
 }
 

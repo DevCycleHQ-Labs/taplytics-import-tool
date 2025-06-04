@@ -17,7 +17,7 @@ func Test_NamingFormat(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		result := generateFeatureKey(testCase.input)
+		result := toKey(testCase.input)
 		if result != testCase.expected {
 			t.Errorf("Expected %s, got %s", testCase.expected, result)
 		}
