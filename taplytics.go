@@ -6,8 +6,9 @@ import (
 )
 
 type TLVariable struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Value any    `json:"value"`
 }
 type TLImportFormat struct {
 	TLProject  string           `json:"tl_project"`
@@ -30,11 +31,30 @@ func (t *TLImportFormat) GetCustomDataProperties() map[string]string {
 }
 
 type TLImportRecord struct {
-	ID          string       `json:"_id"`
-	FeatureName string       `json:"featureName"`
-	Variables   []TLVariable `json:"variables"`
-	Tags        []string     `json:"tags"`
-	Audience    TLAudience   `json:"audience"`
+	ID           string           `json:"_id"`
+	FeatureName  string           `json:"featureName"`
+	Variations   []TLVariation    `json:"variations"`
+	Tags         []string         `json:"tags"`
+	Audience     TLAudience       `json:"audience"`
+	Distribution []TLDistribution `json:"distribution"`
+}
+
+type TLDistribution struct {
+	Name       string  `json:"name"`
+	Percentage float64 `json:"percentage"`
+}
+
+func (d TLDistribution) ToAPIDistribution() map[string]interface{} {
+	return map[string]interface{}{
+		"_variation": toKey(d.Name),
+		"percentage": d.Percentage,
+	}
+}
+
+type TLVariation struct {
+	Name         string       `json:"name"`
+	Variables    []TLVariable `json:"variables"`
+	Distribution float64      `json:"distribution"`
 }
 
 type TLAudience struct {
@@ -52,8 +72,8 @@ type TLFilterItem struct {
 	Comparator  string `json:"comparator"`
 	Values      []any  `json:"values"`
 	SubType     string `json:"subType"`
-	DataKey     string `json:"dataKey"`
-	DataKeyType string `json:"dataKeyType"`
+	DataKey     string `json:"dataKey,omitempty"`
+	DataKeyType string `json:"dataKeyType,omitempty"`
 }
 
 func convertTLFiltersToDevCycleTargeting(tlFilter TLFilter) map[string]interface{} {
@@ -66,6 +86,20 @@ func convertTLFiltersToDevCycleTargeting(tlFilter TLFilter) map[string]interface
 		dvcFilter := map[string]interface{}{}
 
 		switch filter.SubType {
+		case "appVersion":
+			dvcFilter["type"] = "user"
+			dvcFilter["subType"] = filter.SubType
+			dvcFilter["comparator"] = filter.Comparator
+			fixedValues := make([]string, len(filter.Values))
+			for i, v := range filter.Values {
+				if str, ok := v.(string); ok {
+					if len(strings.Split(str, ".")) == 2 {
+						str += ".0" // Ensure it has a patch version
+					}
+					fixedValues[i] = str
+				}
+			}
+			dvcFilter["values"] = filter.Values
 		case "customData":
 			dvcFilter["type"] = "user"
 			dvcFilter["subType"] = "customData"
@@ -93,6 +127,13 @@ func toKey(name string) string {
 		modifiedSections = append(modifiedSections, strcase.ToKebab(section))
 	}
 	key := strings.Join(modifiedSections, "_")
+	// replace all non-alphanumeric characters with empty string; allowing alphanumeric characters, hyphens, periods, and underscores
+	key = strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.' {
+			return r
+		}
+		return -1 // remove the character
+	}, key)
 	return key
 }
 

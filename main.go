@@ -57,7 +57,9 @@ func main() {
 	// Filter out features with no variables
 	var cleanedTLImport []TLImportRecord
 	for _, feature := range tlImport.Records {
-		if len(feature.Variables) == 0 {
+
+		if len(feature.Variations) == 0 {
+			fmt.Println("No variables found for feature:", feature.FeatureName, feature.ID)
 			continue
 		}
 		cleanedTLImport = append(cleanedTLImport, feature)
@@ -70,7 +72,7 @@ func main() {
 		} else {
 			if mergedFeatures[feature.FeatureName].FeatureName != feature.FeatureName {
 				merged := mergedFeatures[feature.FeatureName]
-				merged.Variables = append(merged.Variables, feature.Variables...)
+				merged.Variations = append(merged.Variations, feature.Variations...)
 				mergedFeatures[feature.FeatureName] = merged
 			}
 		}
@@ -78,7 +80,7 @@ func main() {
 
 	dvcApi := newDevCycleAPI()
 
-	fmt.Println("Importing", len(mergedFeatures), "features from Taplytics to DevCycle")
+	fmt.Println("Importing", len(mergedFeatures), "/", len(tlImport.Records), " features from Taplytics to DevCycle")
 	fmt.Println("DevCycle Project:", dvcProject)
 	fmt.Println("CustomData Properties:", tlImport.GetCustomDataProperties())
 

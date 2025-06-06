@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -63,10 +64,12 @@ type devcycleAPI struct {
 // GetDevCycleOAuthToken requests an OAuth token from DevCycle using client credentials.
 func GetDevCycleOAuthToken(clientID, clientSecret string) (string, error) {
 	url := "https://auth.devcycle.com/oauth/token"
+
 	payload := map[string]string{
 		"grant_type":    "client_credentials",
 		"client_id":     clientID,
 		"client_secret": clientSecret,
+		"audience":      "https://api.devcycle.com/",
 	}
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
@@ -137,7 +140,7 @@ func (api *devcycleAPI) doRequest(method, url string, body any) (*http.Response,
 	return api.client.Do(req)
 }
 
-func (api *devcycleAPI) getExistingCustomProperties(dvcProject string) (map[string]struct{}, error) {
+func (api *devcycleAPI) getExistingCustomProperties(dvcProject string) ([]string, error) {
 	url := fmt.Sprintf("%s/projects/%s/customProperties", api.baseURL, dvcProject)
 	resp, err := api.doRequest("GET", url, nil)
 	if err != nil {
@@ -149,14 +152,16 @@ func (api *devcycleAPI) getExistingCustomProperties(dvcProject string) (map[stri
 		return nil, fmt.Errorf("API returned error %d: %s", resp.StatusCode, string(body))
 	}
 	var response []struct {
-		Key string `json:"key"`
+		Key         string `json:"key"`
+		PropertyKey string `json:"propertyKey"`
+		Name        string `json:"name"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		return nil, err
 	}
-	result := make(map[string]struct{})
+	var result []string
 	for _, prop := range response {
-		result[prop.Key] = struct{}{}
+		result = append(result, prop.PropertyKey)
 	}
 	return result, nil
 }
@@ -168,11 +173,13 @@ func (api *devcycleAPI) createCustomProperty(dvcProject, key, dataType string) e
 		dvcType = "Boolean"
 	case "Number":
 		dvcType = "Number"
+	case "JSON":
+		dvcType = "JSON"
 	}
 	payload := map[string]interface{}{
 		"name":        key,
 		"propertyKey": key,
-		"key":         key,
+		"key":         strings.ToLower(key),
 		"type":        dvcType,
 	}
 	url := fmt.Sprintf("%s/projects/%s/customProperties", api.baseURL, dvcProject)
@@ -194,18 +201,36 @@ func (api *devcycleAPI) createDevCycleFeature(dvcProject string, tlFeature TLImp
 	featureKey := toKey(tlFeature.FeatureName)
 
 	var variables []DevCycleVariable
-	for _, tlVar := range tlFeature.Variables {
-		variables = append(variables, DevCycleVariable{
-			Name:        tlVar.Name,
-			Key:         toKey(tlVar.Name),
-			Type:        convertTaplyticsVarTypeToDevCycle(tlVar.Type),
-			Description: fmt.Sprintf("Imported from Taplytics: %s", tlVar.Name),
+	var dedupeVariables = make(map[string]string)
+	var variations []DevCycleVariation
+
+	variationDistributionPct := make(map[string]float64, len(tlFeature.Variations))
+
+	for _, tlVariation := range tlFeature.Variations {
+		variationValues := make(map[string]any, len(tlVariation.Variables))
+		for _, tlVariable := range tlVariation.Variables {
+			variationValues[toKey(tlVariable.Name)] = tlVariable.Value
+			if _, exists := dedupeVariables[tlVariable.Name]; !exists {
+				dedupeVariables[tlVariable.Name] = tlVariable.Type
+				variables = append(variables, DevCycleVariable{
+					Name:        tlVariable.Name,
+					Key:         toKey(tlVariable.Name),
+					Type:        convertTaplyticsVarTypeToDevCycle(tlVariable.Type),
+					Description: fmt.Sprintf("Imported from Taplytics: %s", tlVariable.Name),
+				})
+			}
+		}
+		variations = append(variations, DevCycleVariation{
+			Key:       toKey(tlVariation.Name),
+			Name:      tlVariation.Name,
+			Variables: variationValues,
 		})
+		variationDistributionPct[toKey(tlVariation.Name)] = tlVariation.Distribution
 	}
 
-	variations := []DevCycleVariation{
-		{Key: "imported-on", Name: "On", Variables: createVariationValues(variables, false)},
-		{Key: "imported-off", Name: "Off", Variables: createVariationValues(variables, true)},
+	if len(variables) == 0 {
+		fmt.Println("No variables to import for feature:", tlFeature.FeatureName)
+		return nil
 	}
 
 	featurePayload := DevCycleNewFeaturePOSTBody{
@@ -224,6 +249,20 @@ func (api *devcycleAPI) createDevCycleFeature(dvcProject string, tlFeature TLImp
 		return err
 	}
 	defer resp.Body.Close()
+	// Ignore duplicates
+	if resp.StatusCode == http.StatusConflict {
+		fmt.Println("Feature already exists, skipping creation:", tlFeature.FeatureName)
+		return nil
+	}
+
+	if resp.StatusCode >= http.StatusInternalServerError {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("API returned 5xx error %d: %s", resp.StatusCode, string(body))
+		time.Sleep(time.Second * 3)
+		fmt.Println("Retrying feature creation...")
+		return api.createDevCycleFeature(dvcProject, tlFeature)
+	}
+
 	if resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("API returned error %d: %s", resp.StatusCode, string(body))
@@ -236,21 +275,20 @@ func (api *devcycleAPI) createDevCycleFeature(dvcProject string, tlFeature TLImp
 			Key string `json:"key"`
 		} `json:"variations"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&createResponse); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&createResponse); err != nil {
 		return fmt.Errorf("failed to parse feature creation response: %w", err)
 	}
-	variationKeyToID := make(map[string]string)
-	for _, v := range createResponse.Variations {
-		variationKeyToID[v.Key] = v.ID
+
+	variationIdMap := make(map[string]string)
+	for _, variation := range createResponse.Variations {
+		variationIdMap[variation.Key] = variation.ID
 	}
 
 	if len(tlFeature.Audience.Filters.Filters) > 0 {
-		if variationID, ok := variationKeyToID["imported-on"]; ok {
-			if err := api.createTargetingRule(dvcProject, featureKey, os.Getenv("DEVCYCLE_ENVIRONMENT_KEY"), tlFeature, variationID); err != nil {
+		for _, env := range []string{"development", "staging", "production"} {
+			if err := api.createTargetingRule(dvcProject, featureKey, env, tlFeature); err != nil {
 				return fmt.Errorf("failed to create targeting rules: %w", err)
 			}
-		} else {
-			return fmt.Errorf("could not find variation ID for 'imported-on'")
 		}
 	}
 	return nil
@@ -258,21 +296,33 @@ func (api *devcycleAPI) createDevCycleFeature(dvcProject string, tlFeature TLImp
 
 // --- Feature configuration (targeting rule) ---
 
-func (api *devcycleAPI) createTargetingRule(dvcProject, featureKey, environmentKey string, tlFeature TLImportRecord, variationID string) error {
-	audience := map[string]interface{}{
-		"name":    tlFeature.Audience.Name,
-		"filters": convertTLFiltersToDevCycleTargeting(tlFeature.Audience.Filters),
+func (api *devcycleAPI) createTargetingRule(dvcProject, featureKey, environmentKey string, tlFeature TLImportRecord) error {
+	distribRecord := make([]map[string]interface{}, 0, len(tlFeature.Distribution))
+	for _, dist := range tlFeature.Distribution {
+		distribRecord = append(distribRecord, dist.ToAPIDistribution())
 	}
-	target := map[string]interface{}{
-		"name":     tlFeature.Audience.Name,
-		"audience": audience,
-		"distribution": []map[string]interface{}{{
-			"_variation": variationID,
-			"percentage": 1.0,
-		}},
+
+	for _, filter := range tlFeature.Audience.Filters.Filters {
+		switch filter.SubType {
+		case "appVersion":
+			for i, v := range filter.Values {
+				if str, ok := v.(string); ok {
+					if len(strings.Split(str, ".")) == 2 {
+						str += ".0" // Ensure it has a patch version
+					}
+					filter.Values[i] = str
+				}
+			}
+		}
 	}
+
+	targetingRulePayload := map[string]interface{}{
+		"audience":     tlFeature.Audience,
+		"distribution": distribRecord,
+	}
+
 	configPayload := map[string]interface{}{
-		"targets": []interface{}{target},
+		"targets": []interface{}{targetingRulePayload},
 		"status":  "active",
 	}
 	url := fmt.Sprintf("%s/projects/%s/features/%s/configurations?environment=%s", api.baseURL, dvcProject, featureKey, environmentKey)
@@ -314,140 +364,22 @@ func (api *devcycleAPI) importFeaturesToDevCycle(dvcProject string, mergedFeatur
 	return nil
 }
 
-// DevCycleFeatureConfig represents a feature configuration in DevCycle
-type DevCycleFeatureConfig struct {
-	Name           string                  `json:"name"`
-	FeatureKey     string                  `json:"featureKey"`
-	Enabled        bool                    `json:"enabled"`
-	TargetingRules []DevCycleTargetingRule `json:"targetingRules,omitempty"`
-	ServingRules   []interface{}           `json:"servingRules,omitempty"`
-	VariationKey   string                  `json:"variationKey,omitempty"`
-	Variables      map[string]interface{}  `json:"variables,omitempty"`
-}
-
-// DevCycleTargetingRule represents a targeting rule in DevCycle
-type DevCycleTargetingRule struct {
-	Name         string                 `json:"name"`
-	Audience     map[string]interface{} `json:"audience,omitempty"`
-	VariationKey string                 `json:"variationKey,omitempty"`
-	Variables    map[string]interface{} `json:"variables,omitempty"`
-}
-
-// CreateFeatureConfiguration creates a feature configuration (targeting rule) in DevCycle
-func CreateFeatureConfiguration(
-	apiKey string,
-	projectKey string,
-	featureKey string,
-	tlAudience TLAudience,
-	variationKey string,
-	variables map[string]interface{},
-) error {
-	// Build the feature configuration
-	featureConfig := DevCycleFeatureConfig{
-		Name:         fmt.Sprintf("%s Configuration", featureKey),
-		FeatureKey:   featureKey,
-		Enabled:      true,
-		VariationKey: variationKey,
-		Variables:    variables,
-	}
-
-	// If there's audience targeting, add a targeting rule
-	if tlAudience.Name != "" {
-		targetingRule := DevCycleTargetingRule{
-			Name:         tlAudience.Name,
-			Audience:     convertTLFiltersToDevCycleTargeting(tlAudience.Filters),
-			VariationKey: variationKey,
-			Variables:    variables,
-		}
-		featureConfig.TargetingRules = []DevCycleTargetingRule{targetingRule}
-	}
-
-	// Create the feature configuration via API
-	url := fmt.Sprintf("https://api.devcycle.com/v1/projects/%s/features/%s/configurations", projectKey, featureKey)
-
-	body, err := json.Marshal(featureConfig)
-	if err != nil {
-		return fmt.Errorf("failed to marshal feature configuration: %v", err)
-	}
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
-
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", apiKey))
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("failed to create feature configuration: HTTP %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
-// ConvertAndCreateFeatureConfig converts Taplytics record to DevCycle feature config
-func ConvertAndCreateFeatureConfig(
-	apiKey string,
-	projectKey string,
-	record TLImportRecord,
-	featureKey string,
-) error {
-	// Default variation is true (enabled)
-	variationKey := "true"
-
-	// Build variables map from record.Variables
-	variables := make(map[string]interface{})
-	for _, v := range record.Variables {
-		varKey := toKey(fmt.Sprintf("%s_%s", record.FeatureName, v.Name))
-		// Default values based on type
-		switch convertTaplyticsVarTypeToDevCycle(v.Type) {
-		case "Boolean":
-			variables[varKey] = true
-		case "Number":
-			variables[varKey] = 1
-		case "String":
-			variables[varKey] = "enabled"
-		case "JSON":
-			variables[varKey] = map[string]interface{}{"enabled": true}
-		}
-	}
-
-	// If no variables, we'll just set the feature flag itself
-	if len(variables) == 0 {
-		variables[featureKey] = true
-	}
-
-	return CreateFeatureConfiguration(
-		apiKey,
-		projectKey,
-		featureKey,
-		record.Audience,
-		variationKey,
-		variables,
-	)
-}
-
 func (api *devcycleAPI) checkAndCreateCustomProperties(dvcProject string, customData map[string]string) error {
 	existingProps, err := api.getExistingCustomProperties(dvcProject)
 	if err != nil {
 		return fmt.Errorf("failed to get existing custom properties: %w", err)
 	}
-	for key, dataType := range customData {
-		if _, exists := existingProps[key]; !exists {
-			if err := api.createCustomProperty(dvcProject, key, dataType); err != nil {
-				return fmt.Errorf("failed to create custom property %s: %w", key, err)
-			}
-			fmt.Printf("Created custom property: %s (%s)\n", key, dataType)
-		} else {
-			fmt.Printf("Custom property %s already exists\n", key)
+	for _, prop := range existingProps {
+		if _, exists := customData[prop]; exists {
+			fmt.Println("Found existing custom property - skipping:", prop)
+			delete(customData, prop) // Remove from customData if it already exists
 		}
+	}
+	for key, dataType := range customData {
+		if err := api.createCustomProperty(dvcProject, key, dataType); err != nil {
+			return fmt.Errorf("failed to create custom property %s: %w", key, err)
+		}
+		fmt.Printf("Created custom property: %s (%s)\n", key, dataType)
 	}
 	return nil
 }
