@@ -43,16 +43,6 @@ type DevCycleNewFeaturePOSTBody struct {
 	Tags          []string            `json:"tags"`
 }
 
-func createVariationValues(variables []DevCycleVariable, isEnabled bool) map[string]any {
-	result := make(map[string]any)
-
-	for _, variable := range variables {
-		result[variable.Key] = getDefaultValue(variable.Type, isEnabled)
-	}
-
-	return result
-}
-
 // --- DevCycle API helpers ---
 
 type devcycleAPI struct {
@@ -304,9 +294,12 @@ func (api *devcycleAPI) createTargetingRule(dvcProject, featureKey, environmentK
 
 	for _, filter := range tlFeature.Audience.Filters.Filters {
 		switch filter.SubType {
+		case "platformVersion":
+			fallthrough
 		case "appVersion":
 			for i, v := range filter.Values {
 				if str, ok := v.(string); ok {
+					str = strings.TrimSpace(str)
 					if len(strings.Split(str, ".")) == 2 {
 						str += ".0" // Ensure it has a patch version
 					}
@@ -376,6 +369,9 @@ func (api *devcycleAPI) checkAndCreateCustomProperties(dvcProject string, custom
 		}
 	}
 	for key, dataType := range customData {
+		if key == "" {
+			continue
+		}
 		if err := api.createCustomProperty(dvcProject, key, dataType); err != nil {
 			return fmt.Errorf("failed to create custom property %s: %w", key, err)
 		}

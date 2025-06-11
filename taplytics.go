@@ -20,7 +20,7 @@ func (t *TLImportFormat) GetCustomDataProperties() map[string]string {
 	customData := make(map[string]string)
 	for _, record := range t.Records {
 		for _, aud := range record.Audience.Filters.Filters {
-			if aud.SubType == "customData" {
+			if aud.SubType == "customData" && aud.DataKey != "" {
 				if _, ok := customData[aud.DataKey]; !ok {
 					customData[aud.DataKey] = aud.DataKeyType
 				}
@@ -68,10 +68,10 @@ type TLFilter struct {
 }
 
 type TLFilterItem struct {
-	Type        string `json:"type"`
-	Comparator  string `json:"comparator"`
-	Values      []any  `json:"values"`
-	SubType     string `json:"subType"`
+	Type        string `json:"type,omitempty"`
+	Comparator  string `json:"comparator,omitempty"`
+	Values      []any  `json:"values,omitempty"`
+	SubType     string `json:"subType,omitempty"`
 	DataKey     string `json:"dataKey,omitempty"`
 	DataKeyType string `json:"dataKeyType,omitempty"`
 }
