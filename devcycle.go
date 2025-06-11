@@ -299,6 +299,7 @@ func (api *devcycleAPI) createTargetingRule(dvcProject, featureKey, environmentK
 		case "appVersion":
 			for i, v := range filter.Values {
 				if str, ok := v.(string); ok {
+					str = strings.TrimSpace(str)
 					if len(strings.Split(str, ".")) == 2 {
 						str += ".0" // Ensure it has a patch version
 					}
