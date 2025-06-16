@@ -19,10 +19,12 @@ type TLImportFormat struct {
 func (t *TLImportFormat) GetCustomDataProperties() map[string]string {
 	customData := make(map[string]string)
 	for _, record := range t.Records {
-		for _, aud := range record.Audience.Filters.Filters {
-			if aud.SubType == "customData" && aud.DataKey != "" {
-				if _, ok := customData[aud.DataKey]; !ok {
-					customData[aud.DataKey] = aud.DataKeyType
+		for _, target := range record.Targets {
+			for _, aud := range target.Audience.Filters.Filters {
+				if aud.SubType == "customData" && aud.DataKey != "" {
+					if _, ok := customData[aud.DataKey]; !ok {
+						customData[aud.DataKey] = aud.DataKeyType
+					}
 				}
 			}
 		}
@@ -35,7 +37,7 @@ type TLImportRecord struct {
 	FeatureName  string           `json:"featureName"`
 	Variations   []TLVariation    `json:"variations"`
 	Tags         []string         `json:"tags"`
-	Audience     TLAudience       `json:"audience"`
+	Targets      []TLTarget       `json:"targets"`
 	Distribution []TLDistribution `json:"distribution"`
 }
 
@@ -55,6 +57,12 @@ type TLVariation struct {
 	Name         string       `json:"name"`
 	Variables    []TLVariable `json:"variables"`
 	Distribution float64      `json:"distribution"`
+}
+
+type TLTarget struct {
+	Name         string           `json:"name"`
+	Audience     TLAudience      `json:"audience"`
+	Distribution []TLDistribution `json:"distribution"`
 }
 
 type TLAudience struct {

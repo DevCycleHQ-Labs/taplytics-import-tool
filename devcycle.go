@@ -274,7 +274,16 @@ func (api *devcycleAPI) createDevCycleFeature(dvcProject string, tlFeature TLImp
 		variationIdMap[variation.Key] = variation.ID
 	}
 
-	if len(tlFeature.Audience.Filters.Filters) > 0 {
+	// Check if any target has audiences with filters
+	hasFilters := false
+	for _, target := range tlFeature.Targets {
+		if len(target.Audience.Filters.Filters) > 0 {
+			hasFilters = true
+			break
+		}
+	}
+
+	if hasFilters {
 		for _, env := range []string{"development", "staging", "production"} {
 			if err := api.createTargetingRule(dvcProject, featureKey, env, tlFeature); err != nil {
 				return fmt.Errorf("failed to create targeting rules: %w", err)
@@ -287,35 +296,43 @@ func (api *devcycleAPI) createDevCycleFeature(dvcProject string, tlFeature TLImp
 // --- Feature configuration (targeting rule) ---
 
 func (api *devcycleAPI) createTargetingRule(dvcProject, featureKey, environmentKey string, tlFeature TLImportRecord) error {
-	distribRecord := make([]map[string]interface{}, 0, len(tlFeature.Distribution))
-	for _, dist := range tlFeature.Distribution {
-		distribRecord = append(distribRecord, dist.ToAPIDistribution())
-	}
-
-	for _, filter := range tlFeature.Audience.Filters.Filters {
-		switch filter.SubType {
-		case "platformVersion":
-			fallthrough
-		case "appVersion":
-			for i, v := range filter.Values {
-				if str, ok := v.(string); ok {
-					str = strings.TrimSpace(str)
-					if len(strings.Split(str, ".")) == 2 {
-						str += ".0" // Ensure it has a patch version
+	// Process all filters from all targets
+	for _, target := range tlFeature.Targets {
+		for _, filter := range target.Audience.Filters.Filters {
+			switch filter.SubType {
+			case "platformVersion":
+				fallthrough
+			case "appVersion":
+				for i, v := range filter.Values {
+					if str, ok := v.(string); ok {
+						str = strings.TrimSpace(str)
+						if len(strings.Split(str, ".")) == 2 {
+							str += ".0" // Ensure it has a patch version
+						}
+						filter.Values[i] = str
 					}
-					filter.Values[i] = str
 				}
 			}
 		}
 	}
 
-	targetingRulePayload := map[string]interface{}{
-		"audience":     tlFeature.Audience,
-		"distribution": distribRecord,
+	// Create a targeting rule for each target
+	var targets []interface{}
+	for _, target := range tlFeature.Targets {
+		distribRecord := make([]map[string]interface{}, 0, len(target.Distribution))
+		for _, dist := range target.Distribution {
+			distribRecord = append(distribRecord, dist.ToAPIDistribution())
+		}
+
+		targetingRulePayload := map[string]interface{}{
+			"audience":     target.Audience,
+			"distribution": distribRecord,
+		}
+		targets = append(targets, targetingRulePayload)
 	}
 
 	configPayload := map[string]interface{}{
-		"targets": []interface{}{targetingRulePayload},
+		"targets": targets,
 		"status":  "active",
 	}
 	url := fmt.Sprintf("%s/projects/%s/features/%s/configurations?environment=%s", api.baseURL, dvcProject, featureKey, environmentKey)
@@ -335,13 +352,15 @@ func (api *devcycleAPI) importFeaturesToDevCycle(dvcProject string, mergedFeatur
 	// First, ensure all required custom data properties exist
 	customDataProps := make(map[string]string)
 	for _, feature := range mergedFeatures {
-		for _, filter := range feature.Audience.Filters.Filters {
-			if filter.SubType == "customData" {
-				customDataProps[filter.DataKey] = filter.DataKeyType
+		for _, target := range feature.Targets {
+			for _, filter := range target.Audience.Filters.Filters {
+				if filter.SubType == "customData" {
+					customDataProps[filter.DataKey] = filter.DataKeyType
+				}
 			}
 		}
 	}
-
+	
 	if err := api.checkAndCreateCustomProperties(dvcProject, customDataProps); err != nil {
 		return fmt.Errorf("failed to set up custom properties: %w", err)
 	}
