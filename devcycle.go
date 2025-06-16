@@ -284,7 +284,7 @@ func (api *devcycleAPI) createDevCycleFeature(dvcProject string, tlFeature TLImp
 	}
 
 	if hasFilters {
-		for _, env := range []string{"development", "staging", "production"} {
+		for _, env := range []string{"pre-production", "production"} {
 			if err := api.createTargetingRule(dvcProject, featureKey, env, tlFeature); err != nil {
 				return fmt.Errorf("failed to create targeting rules: %w", err)
 			}
